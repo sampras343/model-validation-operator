@@ -817,5 +817,142 @@ var _ = Describe("Pod webhook", func() {
 			By("Cleanup custom resources namespace")
 			_ = k8sClient.Delete(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: customResTestNamespace}})
 		})
+
+		It("Should set restricted SecurityContext on injected init container", func() {
+			secCtxTestName := "secctx-test"
+			secCtxTestNamespace := fmt.Sprintf("secctx-ns-%d", time.Now().UnixNano())
+
+			By("Creating the Namespace for SecurityContext test")
+			secCtxNs := &corev1.Namespace{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: secCtxTestNamespace,
+				},
+			}
+			err := k8sClient.Create(ctx, secCtxNs)
+			Expect(err).To(Not(HaveOccurred()))
+
+			By("Create ModelValidation resource")
+			secCtxMv := testutil.CreateTestModelValidation(testutil.TestModelValidationOptions{
+				Name:           secCtxTestName,
+				Namespace:      secCtxTestNamespace,
+				ConfigType:     "sigstore",
+				CertIdentity:   "secctx@example.com",
+				CertOidcIssuer: "https://accounts.google.com",
+			})
+			err = k8sClient.Create(ctx, secCtxMv)
+			Expect(err).To(Not(HaveOccurred()))
+
+			statusTracker.AddModelValidation(ctx, secCtxMv)
+
+			By("create labeled pod")
+			secCtxPod := testutil.CreateTestPod(testutil.TestPodOptions{
+				Name:      "secctx-pod",
+				Namespace: secCtxTestNamespace,
+				Labels:    map[string]string{constants.ModelValidationLabel: secCtxTestName},
+			})
+			err = k8sClient.Create(ctx, secCtxPod)
+			Expect(err).To(Not(HaveOccurred()))
+
+			By("Checking that init container has restricted SecurityContext")
+			foundPod := &corev1.Pod{}
+			Eventually(ctx, func(ctx context.Context) []corev1.Container {
+				_ = k8sClient.Get(ctx, types.NamespacedName{
+					Name:      "secctx-pod",
+					Namespace: secCtxTestNamespace,
+				}, foundPod)
+				return foundPod.Spec.InitContainers
+			}, 5*time.Second).Should(HaveLen(1))
+
+			initContainer := foundPod.Spec.InitContainers[0]
+			Expect(initContainer.SecurityContext).ToNot(BeNil(), "SecurityContext must be set")
+			Expect(initContainer.SecurityContext.RunAsNonRoot).ToNot(BeNil())
+			Expect(*initContainer.SecurityContext.RunAsNonRoot).To(BeTrue(), "RunAsNonRoot must be true")
+			Expect(initContainer.SecurityContext.ReadOnlyRootFilesystem).ToNot(BeNil())
+			Expect(*initContainer.SecurityContext.ReadOnlyRootFilesystem).To(BeTrue(), "ReadOnlyRootFilesystem must be true")
+			Expect(initContainer.SecurityContext.AllowPrivilegeEscalation).ToNot(BeNil())
+			Expect(*initContainer.SecurityContext.AllowPrivilegeEscalation).To(BeFalse(), "AllowPrivilegeEscalation must be false")
+			Expect(initContainer.SecurityContext.Capabilities).ToNot(BeNil())
+			Expect(initContainer.SecurityContext.Capabilities.Drop).To(ContainElement(corev1.Capability("ALL")), "Must drop ALL capabilities")
+			Expect(initContainer.SecurityContext.SeccompProfile).ToNot(BeNil())
+			Expect(initContainer.SecurityContext.SeccompProfile.Type).To(Equal(corev1.SeccompProfileTypeRuntimeDefault), "Seccomp must be RuntimeDefault")
+
+			By("Cleanup SecurityContext namespace")
+			_ = k8sClient.Delete(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: secCtxTestNamespace}})
+		})
+
+		It("Should set restricted SecurityContext on continuous validation init container", func() {
+			contSecCtxTestName := "cont-secctx-test"
+			contSecCtxTestNamespace := fmt.Sprintf("cont-secctx-ns-%d", time.Now().UnixNano())
+
+			By("Creating the Namespace for continuous SecurityContext test")
+			contSecCtxNs := &corev1.Namespace{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: contSecCtxTestNamespace,
+				},
+			}
+			err := k8sClient.Create(ctx, contSecCtxNs)
+			Expect(err).To(Not(HaveOccurred()))
+
+			By("Create ModelValidation with continuous validation enabled")
+			contSecCtxMv := testutil.CreateTestModelValidation(testutil.TestModelValidationOptions{
+				Name:           contSecCtxTestName,
+				Namespace:      contSecCtxTestNamespace,
+				ConfigType:     "sigstore",
+				CertIdentity:   "cont-secctx@example.com",
+				CertOidcIssuer: "https://accounts.google.com",
+			})
+			contSecCtxMv.Spec.ContinuousValidation = &v1alpha1.ContinuousValidation{
+				Enabled:  true,
+				Interval: "10m",
+			}
+			err = k8sClient.Create(ctx, contSecCtxMv)
+			Expect(err).To(Not(HaveOccurred()))
+
+			statusTracker.AddModelValidation(ctx, contSecCtxMv)
+
+			By("create labeled pod")
+			contSecCtxPod := testutil.CreateTestPod(testutil.TestPodOptions{
+				Name:      "cont-secctx-pod",
+				Namespace: contSecCtxTestNamespace,
+				Labels:    map[string]string{constants.ModelValidationLabel: contSecCtxTestName},
+			})
+			err = k8sClient.Create(ctx, contSecCtxPod)
+			Expect(err).To(Not(HaveOccurred()))
+
+			By("Checking that continuous validation container has restricted SecurityContext")
+			foundPod := &corev1.Pod{}
+			Eventually(ctx, func(ctx context.Context) int {
+				_ = k8sClient.Get(ctx, types.NamespacedName{
+					Name:      "cont-secctx-pod",
+					Namespace: contSecCtxTestNamespace,
+				}, foundPod)
+				return len(foundPod.Spec.InitContainers) + len(foundPod.Spec.Containers)
+			}, 5*time.Second).Should(BeNumerically(">", 1))
+
+			var validationContainer *corev1.Container
+			for i := range foundPod.Spec.InitContainers {
+				if foundPod.Spec.InitContainers[i].Name == constants.ModelValidationInitContainerName {
+					validationContainer = &foundPod.Spec.InitContainers[i]
+					break
+				}
+			}
+			if validationContainer == nil {
+				for i := range foundPod.Spec.Containers {
+					if foundPod.Spec.Containers[i].Name == constants.ModelValidationSidecarContainerName {
+						validationContainer = &foundPod.Spec.Containers[i]
+						break
+					}
+				}
+			}
+			Expect(validationContainer).ToNot(BeNil(), "Validation container must exist")
+			Expect(validationContainer.SecurityContext).ToNot(BeNil(), "SecurityContext must be set on continuous validation container")
+			Expect(*validationContainer.SecurityContext.RunAsNonRoot).To(BeTrue())
+			Expect(*validationContainer.SecurityContext.ReadOnlyRootFilesystem).To(BeTrue())
+			Expect(*validationContainer.SecurityContext.AllowPrivilegeEscalation).To(BeFalse())
+			Expect(validationContainer.SecurityContext.Capabilities.Drop).To(ContainElement(corev1.Capability("ALL")))
+
+			By("Cleanup continuous SecurityContext namespace")
+			_ = k8sClient.Delete(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: contSecCtxTestNamespace}})
+		})
 	})
 })
