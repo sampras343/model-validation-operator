@@ -59,6 +59,38 @@ var _ = Describe("PodReconciler", func() {
 			Expect(removeByNameCalls[0].Namespace).To(Equal("default"))
 		})
 
+		It("should remove finalizer when label is removed from a previously injected pod", func() {
+			pod := testutil.CreateTestPod(testutil.TestPodOptions{
+				Name:       "unlabeled-pod",
+				Namespace:  "default",
+				Finalizers: []string{constants.ModelValidationFinalizer},
+			})
+
+			fakeClient := testutil.SetupFakeClientWithObjects(pod)
+
+			reconciler = &PodReconciler{
+				Client:  fakeClient,
+				Scheme:  runtime.NewScheme(),
+				Tracker: mockTracker,
+			}
+
+			req := testutil.CreateReconcileRequest(pod.Namespace, pod.Name)
+
+			result, err := reconciler.Reconcile(ctx, req)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result).To(Equal(ctrl.Result{}))
+
+			updatedPod := &corev1.Pod{}
+			err = fakeClient.Get(ctx, req.NamespacedName, updatedPod)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(updatedPod.Finalizers).NotTo(ContainElement(constants.ModelValidationFinalizer),
+				"Finalizer must be removed when label is absent")
+
+			removeByNameCalls := mockTracker.GetRemovePodByNameCalls()
+			Expect(removeByNameCalls).To(HaveLen(1))
+			Expect(removeByNameCalls[0].Name).To(Equal("unlabeled-pod"))
+		})
+
 		It("should process pods with finalizer but not being deleted", func() {
 			pod := testutil.CreateTestPod(testutil.TestPodOptions{
 				Name:       "test-pod",
