@@ -260,6 +260,8 @@ func buildValidationContainer(
 		container.Env = append(container.Env, envs...)
 	}
 
+	container.SecurityContext = restrictedSecurityContext()
+
 	return container
 }
 
@@ -333,7 +335,23 @@ func buildLegacySidecarContainer(
 		}
 	}
 
+	container.SecurityContext = restrictedSecurityContext()
+
 	return container
+}
+
+func restrictedSecurityContext() *corev1.SecurityContext {
+	return &corev1.SecurityContext{
+		RunAsNonRoot:             ptr.To(true),
+		ReadOnlyRootFilesystem:   ptr.To(true),
+		AllowPrivilegeEscalation: ptr.To(false),
+		SeccompProfile: &corev1.SeccompProfile{
+			Type: corev1.SeccompProfileTypeRuntimeDefault,
+		},
+		Capabilities: &corev1.Capabilities{
+			Drop: []corev1.Capability{"ALL"},
+		},
+	}
 }
 
 func validationConfigToArgs(logger logr.Logger, cfg v1alpha1.ValidationConfig, model v1alpha1.Model) []string {
