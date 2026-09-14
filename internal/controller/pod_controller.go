@@ -74,7 +74,13 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result
 
 	modelValidationName, ok := pod.Labels[constants.ModelValidationLabel]
 	if !ok || modelValidationName == "" {
-		// Try to remove the pod in case it was previously tracked but label was removed
+		if controllerutil.ContainsFinalizer(pod, constants.ModelValidationFinalizer) {
+			controllerutil.RemoveFinalizer(pod, constants.ModelValidationFinalizer)
+			if err := r.Update(ctx, pod); err != nil {
+				logger.Error(err, "Failed to remove finalizer from unlabeled pod", "pod", req.NamespacedName)
+				return reconcile.Result{}, err
+			}
+		}
 		if err := r.Tracker.RemovePodByName(ctx, req.NamespacedName); err != nil {
 			logger.Error(err, "Failed to remove pod without label from tracking", "pod", req.NamespacedName)
 			return reconcile.Result{}, err
