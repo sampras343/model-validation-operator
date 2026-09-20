@@ -93,31 +93,29 @@ func (p *podInterceptor) Handle(ctx context.Context, req admission.Request) (res
 		return admission.Allowed("namespace ignored")
 	}
 
-	logger.Info("Checking pod labels", "labels", pod.Labels)
+	logger.Info("Checking pod labels", "matchLabel", pod.Labels[constants.ModelValidationLabel])
 	modelValidationName, ok := pod.Labels[constants.ModelValidationLabel]
 	if !ok || modelValidationName == "" {
 		logger.Info("ModelValidation label not found or empty, skipping injection")
 		return admission.Allowed("no ModelValidation label found, no action needed")
 	}
-	logger.Info("ModelValidation label found, proceeding with injection", "modelValidationName", modelValidationName)
 
-	logger.Info("Search associated Model Validation CR", "pod", pod.Name, "namespace", pod.Namespace,
-		"modelValidationName", modelValidationName)
 	mv := &v1alpha1.ModelValidation{}
 	err := p.client.Get(ctx, client.ObjectKey{Name: modelValidationName, Namespace: pod.Namespace}, mv)
 	if err != nil {
-		msg := fmt.Sprintf("failed to get the ModelValidation CR %s/%s", pod.Namespace, modelValidationName)
-		logger.Error(err, msg)
+		logger.Error(err, "failed to get ModelValidation CR", "namespace", pod.Namespace, "modelValidation", modelValidationName)
 		return admission.Errored(http.StatusBadRequest, err) // Fail deployment if CR not found
 	}
 	// NOTE: check if validation sidecar is already injected. Then no action needed.
 	for _, c := range pod.Spec.InitContainers {
 		if c.Name == constants.ModelValidationInitContainerName {
+			logger.V(1).Info("Validation init container already exists, skipping", "pod", pod.Name, "namespace", req.Namespace)
 			return admission.Allowed("validation exists, no action needed")
 		}
 	}
 	for _, c := range pod.Spec.Containers {
 		if c.Name == constants.ModelValidationSidecarContainerName {
+			logger.V(1).Info("Validation sidecar already exists, skipping", "pod", pod.Name, "namespace", req.Namespace)
 			return admission.Allowed("validation exists, no action needed")
 		}
 	}
@@ -165,8 +163,18 @@ func (p *podInterceptor) Handle(ctx context.Context, req admission.Request) (res
 		pp.Spec.Containers = append(pp.Spec.Containers, sidecar)
 	}
 
+	logger.Info("Injected validation container",
+		"pod", pod.Name,
+		"namespace", req.Namespace,
+		"modelValidation", modelValidationName,
+		"authMethod", mv.GetAuthMethod(),
+		"continuous", continuousEnabled,
+		"legacySidecar", useLegacySidecar,
+	)
+
 	marshaledPod, err := json.Marshal(pp)
 	if err != nil {
+		logger.Error(err, "failed to marshal mutated pod")
 		return admission.Errored(http.StatusInternalServerError, err)
 	}
 
@@ -355,10 +363,8 @@ func restrictedSecurityContext() *corev1.SecurityContext {
 }
 
 func validationConfigToArgs(logger logr.Logger, cfg v1alpha1.ValidationConfig, model v1alpha1.Model) []string {
-	logger.Info("construct args")
 	res := []string{}
 	if cfg.SigstoreConfig != nil {
-		logger.Info("found sigstore config")
 		res = append(res,
 			"sigstore",
 			fmt.Sprintf("--signature=%s", model.SignaturePath),
@@ -366,21 +372,19 @@ func validationConfigToArgs(logger logr.Logger, cfg v1alpha1.ValidationConfig, m
 			"--identity_provider", cfg.SigstoreConfig.CertificateOidcIssuer,
 		)
 	} else if cfg.PublicKeyConfig != nil {
-		logger.Info("found public-key config")
 		res = append(res,
 			"key",
 			fmt.Sprintf("--signature=%s", model.SignaturePath),
 			"--public_key", cfg.PublicKeyConfig.KeyPath,
 		)
 	} else if cfg.PkiConfig != nil {
-		logger.Info("found pki config")
 		res = append(res,
 			"certificate",
 			fmt.Sprintf("--signature=%s", model.SignaturePath),
 			"--certificate_chain", cfg.PkiConfig.CertificateAuthority,
 		)
 	} else {
-		logger.Info("missing validation config")
+		logger.Error(nil, "missing validation config")
 		return []string{}
 	}
 
