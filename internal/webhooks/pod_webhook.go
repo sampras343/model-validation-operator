@@ -143,7 +143,10 @@ func (p *podInterceptor) Handle(ctx context.Context, req admission.Request) (res
 
 	vm := []corev1.VolumeMount{}
 	for _, c := range pod.Spec.Containers {
-		vm = append(vm, c.VolumeMounts...)
+		for _, m := range c.VolumeMounts {
+			m.ReadOnly = true
+			vm = append(vm, m)
+		}
 	}
 
 	continuousEnabled := mv.Spec.ContinuousValidation != nil && mv.Spec.ContinuousValidation.Enabled
