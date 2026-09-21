@@ -141,13 +141,8 @@ func (p *podInterceptor) Handle(ctx context.Context, req admission.Request) (res
 		logger.Error(err, "failed to find TelemetryConfig, proceeding without telemetry")
 	}
 
-	vm := []corev1.VolumeMount{}
-	for _, c := range pod.Spec.Containers {
-		for _, m := range c.VolumeMounts {
-			m.ReadOnly = true
-			vm = append(vm, m)
-		}
-	}
+	neededPaths := collectNeededPaths(mergedModel, mv.Spec.Config)
+	vm := filterVolumeMounts(pod.Spec.Containers, neededPaths)
 
 	continuousEnabled := mv.Spec.ContinuousValidation != nil && mv.Spec.ContinuousValidation.Enabled
 	useLegacySidecar := continuousEnabled && !p.nativeSidecarSupport
@@ -474,6 +469,43 @@ func mergeModelWithAnnotations(logger logr.Logger, model v1alpha1.Model, annotat
 	}
 
 	return *merged
+}
+
+// collectNeededPaths returns file paths the validation agent needs access to.
+func collectNeededPaths(model v1alpha1.Model, cfg v1alpha1.ValidationConfig) []string {
+	paths := []string{model.Path}
+	if model.SignaturePath != "" {
+		paths = append(paths, model.SignaturePath)
+	}
+	if cfg.PkiConfig != nil && cfg.PkiConfig.CertificateAuthority != "" {
+		paths = append(paths, cfg.PkiConfig.CertificateAuthority)
+	}
+	if cfg.PublicKeyConfig != nil && cfg.PublicKeyConfig.KeyPath != "" {
+		paths = append(paths, cfg.PublicKeyConfig.KeyPath)
+	}
+	return paths
+}
+
+// filterVolumeMounts returns only the mounts whose mountPath is a prefix of a needed path, all forced read-only.
+func filterVolumeMounts(containers []corev1.Container, neededPaths []string) []corev1.VolumeMount {
+	seen := make(map[string]bool)
+	var out []corev1.VolumeMount
+	for _, c := range containers {
+		for _, m := range c.VolumeMounts {
+			if seen[m.MountPath] {
+				continue
+			}
+			for _, p := range neededPaths {
+				if strings.HasPrefix(p, m.MountPath) {
+					m.ReadOnly = true
+					out = append(out, m)
+					seen[m.MountPath] = true
+					break
+				}
+			}
+		}
+	}
+	return out
 }
 
 func webhookResult(resp admission.Response) string {
