@@ -154,8 +154,10 @@ func (p *podInterceptor) Handle(ctx context.Context, req admission.Request) (res
 	if mv.Spec.Config.SigstoreConfig != nil {
 		const tufVolName = "sigstore-tuf-cache"
 		pp.Spec.Volumes = append(pp.Spec.Volumes, corev1.Volume{
-			Name:         tufVolName,
-			VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+			Name: tufVolName,
+			VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{
+				SizeLimit: ptr.To(resource.MustParse("10Mi")),
+			}},
 		})
 		vm = append(vm, corev1.VolumeMount{Name: tufVolName, MountPath: "/.sigstore"})
 	}
@@ -498,17 +500,23 @@ func collectNeededPaths(model v1alpha1.Model, cfg v1alpha1.ValidationConfig) []s
 	return paths
 }
 
-// filterVolumeMounts returns only the mounts whose mountPath is a prefix of a needed path, all forced read-only.
+// filterVolumeMounts returns only the mounts whose mountPath is a proper directory
+// prefix of a needed path, all forced read-only. Mounts at "/" are excluded to
+// prevent leaking the entire root filesystem into the validation container.
 func filterVolumeMounts(containers []corev1.Container, neededPaths []string) []corev1.VolumeMount {
 	seen := make(map[string]bool)
 	var out []corev1.VolumeMount
 	for _, c := range containers {
 		for _, m := range c.VolumeMounts {
-			if seen[m.MountPath] {
+			if seen[m.MountPath] || m.MountPath == "/" {
 				continue
 			}
+			prefix := m.MountPath
+			if !strings.HasSuffix(prefix, "/") {
+				prefix += "/"
+			}
 			for _, p := range neededPaths {
-				if strings.HasPrefix(p, m.MountPath) {
+				if strings.HasPrefix(p, prefix) || p == m.MountPath {
 					m.ReadOnly = true
 					out = append(out, m)
 					seen[m.MountPath] = true
