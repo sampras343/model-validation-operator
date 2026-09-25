@@ -151,6 +151,15 @@ func (p *podInterceptor) Handle(ctx context.Context, req admission.Request) (res
 		logger.Info("Using legacy sidecar for continuous validation (native sidecars not supported)")
 	}
 
+	if mv.Spec.Config.SigstoreConfig != nil {
+		const tufVolName = "sigstore-tuf-cache"
+		pp.Spec.Volumes = append(pp.Spec.Volumes, corev1.Volume{
+			Name:         tufVolName,
+			VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+		})
+		vm = append(vm, corev1.VolumeMount{Name: tufVolName, MountPath: "/.sigstore"})
+	}
+
 	container := buildValidationContainer(mv, args, vm, pp, tc, p.nativeSidecarSupport)
 	pp.Spec.InitContainers = append(pp.Spec.InitContainers, container)
 
@@ -482,6 +491,9 @@ func collectNeededPaths(model v1alpha1.Model, cfg v1alpha1.ValidationConfig) []s
 	}
 	if cfg.PublicKeyConfig != nil && cfg.PublicKeyConfig.KeyPath != "" {
 		paths = append(paths, cfg.PublicKeyConfig.KeyPath)
+	}
+	if cfg.ClientTrustConfig != nil && cfg.ClientTrustConfig.TrustConfigPath != "" {
+		paths = append(paths, cfg.ClientTrustConfig.TrustConfigPath)
 	}
 	return paths
 }
